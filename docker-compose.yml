@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    container_name: stock-backend
+    ports:
+      - "8017:8017"
+    volumes:
+      - stock_data:/app/data
+    environment:
+      - TZ=Asia/Shanghai
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8017/api/system/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build: ./frontend
+    container_name: stock-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - TZ=Asia/Shanghai
+      - NEXT_PUBLIC_API_URL=http://backend:8017
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  stock_data:
