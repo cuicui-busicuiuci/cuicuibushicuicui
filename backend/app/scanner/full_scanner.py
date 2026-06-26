@@ -128,7 +128,9 @@ def enrich_with_quotes(stocks: List[Dict], max_workers: int = 10) -> List[Dict]:
                     "open": q.get("open", 0),
                     "high": q.get("high", 0),
                     "low": q.get("low", 0),
-                    "volume": q.get("amount_wan", 0),
+                    "volume": q.get("volume", 0),  # 成交量（手）
+                    # amount_wan 是成交额(万元)，转换为元
+                    "amount": q.get("amount", 0) or (q.get("amount_wan", 0) * 10000),
                     "turnover_pct": q.get("turnover_pct", 0),
                     "vol_ratio": q.get("vol_ratio", 0),
                     "amplitude_pct": q.get("amplitude_pct", 0),
@@ -179,12 +181,30 @@ def scan_stock(stock: dict, strategy_manager, sentiment_model) -> dict:
             "code": code, "name": name,
             "price": price, "close_price": price,
             "change_pct": change_pct,
-            "hot_score": stock.get("volume", 0),
-            "concept_tags": [],
-            "popularity_tag": "",
+            # hot_score: 优先用同花顺热度，没有则用成交额代理（非成交量）
+            "hot_score": stock.get("hot_score", 0) or stock.get("amount", 0) or 0,
+            "concept_tags": stock.get("concept_tags", []) or [],
+            "popularity_tag": stock.get("popularity_tag", "") or "",
+            "sector": stock.get("sector", "") or "",
+            "board_count": stock.get("board_count", 0) or 0,
+            "main_net_inflow": stock.get("main_net_inflow", 0) or 0,
+            "main_net_5d": stock.get("main_net_5d", 0) or 0,
+            "turnover_pct": turnover,
+            "pe_ttm": stock.get("pe_ttm", 0) or 0,
+            "pb": stock.get("pb", 0) or 0,
+            "mcap": mcap,
+            "volume": stock.get("volume", 0) or 0,
+            "amount": stock.get("amount", 0) or 0,
             "reason": f"全A扫描 | 涨幅{change_pct:+.2f}% | 换手{turnover:.1f}% | PE{stock.get('pe_ttm',0):.0f} | 技术{tech['total_score']}分",
             "analyse": "",
         }
+
+        # 如果有 efinance 补充字段，也传递给策略
+        for ef_field in ("sector_change_pct", "sector_rank", "limit_up_today",
+                         "recent_limit_ups", "today_main_net", "main_force_pace",
+                         "main_force_strength", "consecutive_inflow_days"):
+            if stock.get(ef_field) is not None:
+                data[ef_field] = stock[ef_field]
 
         signals = []
         for strategy in strategy_manager.strategies:
@@ -259,6 +279,26 @@ def full_market_scan(max_stocks: int = 0, min_score: int = 40, with_quotes: bool
         print(f"[扫描器] 获取到 {len(candidates)} 只有效行情")
         # 再次用实时数据筛选
         candidates = [s for s in candidates if s.get("price", 0) >= 2 and s.get("turnover_pct", 0) > 0]
+
+    # === efinance 字段补充：对前200只（按涨幅排序）补充板块/资金流/连板数据 ===
+    # 全市场5500只都补充太慢，只为最有潜力的200只补充
+    try:
+        # 按涨幅排序，取前200只
+        sorted_candidates = sorted(candidates, key=lambda x: abs(x.get("change_pct", 0)), reverse=True)
+        top_for_enrich = sorted_candidates[:200]
+        if top_for_enrich:
+            print(f"[扫描器] 补充 efinance 字段（前{len(top_for_enrich)}只）...")
+            from app.datasources.efinance_source import batch_enrich_candidates
+            batch_enrich_candidates(top_for_enrich, max_workers=8, total_timeout=90.0)
+            # 也补充机构行为
+            try:
+                from app.datasources.institution_tracker import batch_enrich_institution
+                batch_enrich_institution(top_for_enrich, max_workers=4, total_timeout=45.0)
+            except Exception as e:
+                print(f"[扫描器] 机构行为补充失败: {e}")
+            print(f"[扫描器] efinance 字段补充完成")
+    except Exception as e:
+        print(f"[扫描器] efinance 补充失败（不影响扫描）: {e}")
 
     if max_stocks and max_stocks > 0:
         candidates = candidates[:max_stocks]
